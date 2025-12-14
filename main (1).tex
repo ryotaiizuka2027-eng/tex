@@ -1,0 +1,394 @@
+% --- UNIVERSAL PREAMBLE BLOCK ---
+\documentclass[11pt, a4paper]{article}
+\usepackage[a4paper, top=2.5cm, bottom=2.5cm, left=2cm, right=2cm]{geometry}
+\usepackage{fontspec}
+
+\usepackage[japanese, bidi=basic, provide=*]{babel}
+
+\babelprovide[import, onchar=ids fonts]{japanese}
+\babelprovide[import, onchar=ids fonts]{english}
+
+% Set default/Latin font to Sans Serif in the main (rm) slot
+\babelfont{rm}{Noto Sans}
+% Assign a specific font for Japanese text
+\babelfont[japanese]{rm}{Noto Sans CJK JP}
+
+% Add because main language is not English
+\usepackage{enumitem}
+\setlist[itemize]{label=-}
+
+% --- PACKAGES FOR MATH & FIGURES ---
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{amsthm}
+\usepackage{booktabs}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{graphicx}
+\usepackage{bm}
+
+% --- THEOREMS ---
+\newtheorem{theorem}{定理}
+\newtheorem{definition}{定義}
+\newtheorem{lemma}{補題}
+
+% --- ALGORITHM CUSTOMIZATION ---
+\algrenewcommand\algorithmicrequire{\textbf{入力:}}
+\algrenewcommand\algorithmicensure{\textbf{出力:}}
+\algrenewcommand\algorithmiccomment[1]{\hfill // #1}
+
+% --- TITLE INFO ---
+\title{強化学習による相乗的数式アルファ因子の生成手法}
+\author{Quantitative Research Division}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\section{エグゼクティブ・サマリー}
+本ドキュメントは，論文「Generating Synergistic Formulaic Alpha Collections via Reinforcement Learning」で提案されたアルファ探索フレームワークの実装詳細を記述するものである．
+単独で高い情報係数（IC）を持つファクターを発見することは日常的な課題であるが，実際のポートフォリオ構築においては「既存ファクターとの直交性（Orthogonality）」や「分散効果」が重要となる．従来の手法（遺伝的プログラミング等）は個別のIC最大化に偏重しがちであり，結果として既存モデルと相関の高い，付加価値の低いファクターを生成する傾向があった．
+
+本手法は，強化学習（RL）のエージェントに対し，下流の結合モデル（ポートフォリオ）の性能向上分を直接報酬として与えることで，「相乗効果（Synergy）のあるファクター集合」を直接最適化する．以下に，その数理的基盤と実装プロセスを詳細に解説し，最後に統合アルゴリズム定義を示す．
+
+\section{数理モデルの定式化}
+
+\subsection{ユニバースとデータ構造}
+投資ユニバースを構成する銘柄数を $n$，バックテスト期間（総営業日数）を $T$ とする．
+時点 $t \in \{1, \dots, T\}$ における市場データ（始値，高値，安値，終値，出来高等）を特徴量行列 $X_t \in \mathbb{R}^{n \times d}$ とする．
+ここで $d$ は生の特徴量およびそこから派生するテクニカル指標の次元数である．
+
+ターゲット変数 $y_t \in \mathbb{R}^n$ は，時点 $t$ における全銘柄の将来のリターン（例：20日後リターン）を表すベクトルである．
+具体的には，$y_{t, i}$ は時点 $t$ における銘柄 $i$ のリターンを指す．
+
+\subsection{アルファ因子と正規化演算子}
+アルファ因子 $f: \mathbb{R}^{n \times d} \to \mathbb{R}^n$ は，市場データを入力とし，各銘柄の投資ウェイト（シグナル）を出力する関数である．
+
+実務上の比較可能性を担保し，数値計算の安定性を図るため，以下の正規化演算子 $\mathcal{N}$ を定義する．これは各時点 $t$ におけるクロスセクション方向（銘柄間）での標準化に相当する．
+
+\begin{definition}[Cross-Sectional Normalization]
+任意のベクトル $u \in \mathbb{R}^n$ に対し，演算子 $\mathcal{N}$ を以下のように定義する．
+\begin{equation}
+    [\mathcal{N}(u)]_i = \frac{u_i - \mu_u}{\sigma_u}, \quad \text{where } \mu_u = \frac{1}{n}\sum_{j=1}^n u_j, \quad \sigma_u = \sqrt{\sum_{j=1}^n (u_j - \mu_u)^2}
+\end{equation}
+ここで，添え字 $i, j \in \{1, \dots, n\}$ は銘柄のインデックスを表す．
+この定義により，常に $\|\mathcal{N}(u)\|^2 = n$ ではなく分散が1となるが，論文の定義に従いベクトルノルムが1となるようスケーリング係数を調整する（$\frac{1}{\sqrt{n}}$を掛ける等）．本稿では単純化のため，$\|\mathcal{N}(u)\| = 1$ かつ $\sum_{i=1}^n [\mathcal{N}(u)]_i = 0$ が成立しているものとする．
+\end{definition}
+
+\subsection{目的関数：ポートフォリオICの最大化}
+我々の目的は，単一の $f$ ではなく，最適なアルファ集合 $\mathcal{F} = \{f_1, \dots, f_k\}$ およびその結合ウェイト $\bm{w} \in \mathbb{R}^k$ を求めることである．ここで $k$ はアルファ因子の総数である．
+結合モデル $c$ は線形結合とする．
+\begin{equation}
+    \bm{z}_t = c(X_t; \mathcal{F}, \bm{w}) = \sum_{p=1}^k w_p f_p(X_t)
+\end{equation}
+ここで，$w_p$ は $p$ 番目のアルファ因子に対する重み，$f_p(X_t)$ は $p$ 番目のアルファ因子による時点 $t$ のシグナルベクトルである．
+
+最適化問題は，予測値 $\bm{z}$ とターゲット $\bm{y}$ の平均二乗誤差（MSE）最小化として定式化される．
+\begin{equation}
+    \min_{\bm{w}} \mathcal{L}(\bm{w}) = \frac{1}{T} \sum_{t=1}^T \| \bm{z}_t - \bm{y}_t \|^2
+\end{equation}
+※ $\bm{z}_t, \bm{y}_t$ は正規化済みとする．
+
+\section{最適化プロセスの詳細}
+
+強化学習の報酬計算において，毎回 $T \times n$ のデータをスキャンしてMSEを計算するのは計算コストが高すぎる．そこで，以下の定理を用いて計算を効率化する．これはポートフォリオ理論における平均分散アプローチの変形と解釈できる．
+
+\subsection{定理 3.1 の導出と実装形式}
+
+\begin{theorem}[MSEの分解]
+正規化された入力に対し，MSE損失関数は次のように展開される．
+\begin{equation}
+    \mathcal{L}(\bm{w}) = 1 - 2 \bm{w}^\top \bm{b} + \bm{w}^\top \bm{\Sigma} \bm{w}
+\end{equation}
+ここで，各変数の定義は以下の通りである．
+\begin{itemize}
+    \item $\bm{b} \in \mathbb{R}^k$: 各アルファのICベクトル．要素 $b_i$ は $i$ 番目のアルファ因子の平均ICを表す．
+    $$ b_i = \mathbb{E}_t[\langle f_i(X_t), y_t \rangle] = \frac{1}{T} \sum_{t=1}^T \sum_{m=1}^n f_i(X_t)_m \cdot y_{t, m} $$
+    \item $\bm{\Sigma} \in \mathbb{R}^{k \times k}$: アルファ間の相関行列．要素 $\Sigma_{ij}$ は $i$ 番目と $j$ 番目のアルファ因子の平均相関を表す．
+    $$ \Sigma_{ij} = \mathbb{E}_t[\langle f_i(X_t), f_j(X_t) \rangle] = \frac{1}{T} \sum_{t=1}^T \langle f_i(X_t), f_j(X_t) \rangle $$
+\end{itemize}
+\end{theorem}
+
+\begin{proof}
+定義より，
+\begin{align}
+    \mathcal{L}(\bm{w}) &= \mathbb{E}_t [ \| \sum_i w_i f_i - y \|^2 ] \\
+    &= \mathbb{E}_t [ \| \sum_i w_i f_i \|^2 - 2 \langle \sum_i w_i f_i, y \rangle + \| y \|^2 ] \\
+    &= \sum_i \sum_j w_i w_j \mathbb{E}_t [\langle f_i, f_j \rangle] - 2 \sum_i w_i \mathbb{E}_t [\langle f_i, y \rangle] + 1 \\
+    &= \bm{w}^\top \bm{\Sigma} \bm{w} - 2 \bm{w}^\top \bm{b} + 1
+\end{align}
+ここで添え字 $i, j$ はアルファ因子のインデックス（$1, \dots, k$）を走る．
+\end{proof}
+
+\subsection{増分的更新のメカニズム}
+新しいアルファ因子 $f_{\text{new}}$ が生成された際，全データを再計算することなく，以下の手順で効率的に結合モデルを更新する．
+
+\subsubsection{1. 評価と行列の拡張 (Evaluation \& Expansion)}
+新規アルファ $f_{\text{new}}$ について，検証用データセット上でのシグナル列 $\bm{z}_{\text{new}}$ を計算する．これに基づき，既存アルファとの相関ベクトル $\bm{c}_{\text{new}}$ および単体IC $b_{\text{new}}$ を算出する．
+
+\begin{equation}
+    c_j = \text{Corr}(f_{\text{new}}, f_j), \quad b_{\text{new}} = \text{IC}(f_{\text{new}})
+\end{equation}
+ここで $j$ は既存のアルファ因子のインデックスである．
+
+これらを用いて，ICベクトル $\bm{b}$ と相関行列 $\bm{\Sigma}$ を拡張する．
+\begin{equation}
+    \bm{b} \leftarrow \begin{bmatrix} \bm{b} \\ b_{\text{new}} \end{bmatrix}, \quad
+    \bm{\Sigma} \leftarrow \begin{bmatrix} \bm{\Sigma} & \bm{c}_{\text{new}} \\ \bm{c}_{\text{new}}^\top & 1.0 \end{bmatrix}
+\end{equation}
+
+\subsubsection{2. 勾配法による重み最適化 (Gradient Update)}
+拡張された $\bm{b}, \bm{\Sigma}$ を用いて，損失関数 $\mathcal{L}(\bm{w})$ の勾配を解析的に計算する．
+\begin{equation}
+    \nabla_{\bm{w}} \mathcal{L} = 2 \bm{\Sigma} \bm{w} - 2 \bm{b}
+\end{equation}
+この勾配を用いて，勾配降下法により重み $\bm{w}$ を更新する．数回のイテレーションで十分収束する．
+
+\subsubsection{3. プルーニング (Pruning)}
+ポートフォリオサイズが上限 $K_{\max}$ を超えた場合，あるいは冗長な因子を排除するために，絶対値ウェイト $|w_i|$ が最小の因子を削除する．これに伴い，$\bm{b}, \bm{\Sigma}$ の該当する行・列も削除し，モデルをコンパクトに保つ．
+
+\section{アルファ生成器のアーキテクチャ詳細}
+
+本システムの中核となるのは，数式をトークン列として生成するLSTMベースのエージェントである．これは自然言語処理における文章生成と同様に，自己回帰的（Auto-regressive）にトークンを一つずつ決定していくプロセスをとる．
+
+\subsection{生成モデルの構造：エンコーダーと方策ヘッド}
+
+アルファ生成器は，入力されたトークン列の履歴（状態）を固定長ベクトルに圧縮する「LSTMエンコーダー」と，その特徴ベクトルから次のトークンの確率分布を出力する「方策ヘッド（Policy Head）」から構成される．
+
+\subsubsection{1. トークン埋め込みとLSTMエンコーダー}
+生成ステップ $\tau$ において，これまでに生成されたトークン列 $s_\tau = (a_0, a_1, \dots, a_{\tau-1})$ が存在する（$a_0$は開始トークン\texttt{BEG}）．
+各トークンは埋め込み層によりベクトル化され，LSTMに入力される．
+
+\begin{equation}
+    \bm{e}_\tau = \text{Embedding}(a_{\tau-1})
+\end{equation}
+\begin{equation}
+    \bm{h}_\tau, \bm{c}_\tau = \text{LSTM}(\bm{e}_\tau, \bm{h}_{\tau-1}, \bm{c}_{\tau-1})
+\end{equation}
+
+ここで，隠れ状態 $\bm{h}_\tau$ は，過去の生成履歴（文脈情報）をすべて圧縮した特徴表現となっており，これがエンコーダーの出力となる．
+
+\subsubsection{2. 方策ヘッドによる次トークン予測}
+エンコーダー出力 $\bm{h}_\tau$ を入力として，全結合層（MLP）とソフトマックス関数により，次に生成すべきトークン $a_\tau$ の確率分布を計算する．
+
+\begin{equation}
+    P(a_\tau | s_\tau) = \text{Softmax}(\bm{W}_{\text{policy}} \bm{h}_\tau + \bm{b}_{\text{policy}} + \bm{m}_\tau)
+\end{equation}
+
+ここで $\bm{m}_\tau$ は後述する無効アクションマスクである．
+
+\subsection{数式生成の具体例（ステップ・バイ・ステップ）}
+
+数式 $f = \text{Add}(\$close, 10)$（終値に10を加える）を生成する場合の，逆ポーランド記法（RPN）に基づく生成プロセスを以下に示す．
+RPNでは \texttt{[\$close, 10, Add]} の順でトークンが並ぶ．
+
+\begin{table}[h]
+\centering
+\caption{数式 $\text{Add}(\$close, 10)$ の生成トレーシング}
+\label{tab:generation_trace}
+\begin{tabular}{c l l c l}
+\toprule
+Step $\tau$ & 入力トークン & 現在の状態 (RPN列) & スタック深さ & エージェントの動作 \\
+\midrule
+0 & (なし) & \texttt{[BEG]} & 0 & 初期化．開始トークンのみ． \\
+1 & \texttt{BEG} & \texttt{[BEG]} & 0 & 特徴量 \texttt{\$close} を選択． \\
+2 & \texttt{\$close} & \texttt{[BEG, \$close]} & 1 & 定数 \texttt{10} を選択． \\
+3 & \texttt{10} & \texttt{[BEG, \$close, 10]} & 2 & 演算子 \texttt{Add} を選択． \\
+4 & \texttt{Add} & \texttt{[BEG, \$close, 10, Add]} & 1 & 終了トークン \texttt{SEP} を選択． \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{解説:}
+\begin{itemize}
+    \item \textbf{Step 3での判断}: スタック深さが2（\texttt{\$close}と\texttt{10}が積まれている）であるため，2項演算子である \texttt{Add} は選択可能な「有効アクション」となる．
+    \item \textbf{Step 4での判断}: \texttt{Add} の実行によりスタックから2要素が消費され1要素（計算結果）が積まれるため，深さは1になる．深さが1の場合のみ，数式が完成したとみなされ \texttt{SEP}（終了）が選択可能になる．
+\end{itemize}
+
+\subsection{無効アクションマスキング (Invalid Action Masking)}
+文法的に誤った数式（例：引数が足りない状態で演算子を生成する等）を防ぐため，ロジットにマスクを適用する．
+現在のスタック状態を追跡する変数を想定する．
+
+\begin{itemize}
+    \item $S_{\text{depth}}$: 現在のオペランドスタックの深さ
+    \item $Arity(op)$: 演算子 $op$ が必要とする引数の数
+\end{itemize}
+
+マスクベクトル $\bm{m}_\tau$ の各要素 $m_{\tau, a}$ は以下のように決定される．
+\begin{equation}
+    m_{\tau, a} = 
+    \begin{cases} 
+    0 & \text{if Action } a \text{ is Valid} \\
+    -\infty & \text{if Action } a \text{ is Invalid}
+    \end{cases}
+\end{equation}
+
+\textbf{無効判定のロジック例:}
+\begin{itemize}
+    \item \textbf{2項演算子（Add等）}: $S_{\text{depth}} < 2$ の場合，オペランド不足のため無効．
+    \item \textbf{終了トークン（SEP）}: $S_{\text{depth}} \neq 1$ の場合，数式が1つの値に収束していないため無効．
+\end{itemize}
+
+\subsection{LSTMネットワーク数式（詳細）}
+LSTMセル内部のゲート演算は以下の通り定義される．
+\begin{align}
+    \bm{f}_\tau &= \sigma(\bm{W}_f \cdot [\bm{h}_{\tau-1}, \bm{e}_\tau] + \bm{b}_f) \\
+    \bm{i}_\tau &= \sigma(\bm{W}_i \cdot [\bm{h}_{\tau-1}, \bm{e}_\tau] + \bm{b}_i) \\
+    \tilde{\bm{C}}_\tau &= \tanh(\bm{W}_C \cdot [\bm{h}_{\tau-1}, \bm{e}_\tau] + \bm{b}_C) \\
+    \bm{C}_\tau &= \bm{f}_\tau * \bm{C}_{\tau-1} + \bm{i}_\tau * \tilde{\bm{C}}_\tau \\
+    \bm{o}_\tau &= \sigma(\bm{W}_o \cdot [\bm{h}_{\tau-1}, \bm{e}_\tau] + \bm{b}_o) \\
+    \bm{h}_\tau &= \bm{o}_\tau * \tanh(\bm{C}_\tau)
+\end{align}
+ここで $\sigma$ はシグモイド関数，$*$ は要素ごとの積を表す．
+
+\section{強化学習トレーニングの詳細}
+
+エージェントの目的関数には，PPO（Proximal Policy Optimization）を用いる．
+
+\subsection{報酬設計: 限界貢献分 (Marginal Contribution)}
+本手法の最大の特長は報酬設計にある．生成されたアルファ $f_{\text{new}}$ に対する報酬 $R$ は，そのアルファをポートフォリオに追加したことによる**検証データセット上でのIC向上分**とする．
+
+\begin{equation}
+    R(f_{\text{new}}) = \text{IC}_{\text{new\_portfolio}} - \text{IC}_{\text{old\_portfolio}}
+\end{equation}
+
+これにより，エージェントは「単体性能が高い因子」ではなく，「既存ポートフォリオの弱点を補完し，全体性能を押し上げる因子」を探索するように動機づけられる．
+
+\subsection{価値関数とアドバンテージ (GAE) の定義}
+
+本フレームワークでは，各生成ステップ $\tau$ における状態 $s_\tau$ の価値を推定するために，価値関数ネットワーク $V_\phi(s_\tau)$ を学習する．
+
+\subsubsection*{価値関数 $V_\phi(s_\tau)$ の意味}
+価値関数 $V_\phi(s_\tau)$ は、現在の状態 $s_\tau$（生成途中のトークン列、すなわち書きかけの数式）から出発して、最終的に完成する数式がどれだけの報酬（限界IC貢献分）を獲得できるかの**期待値**を表す．
+数式生成タスクにおいては，エピソードの途中で報酬は発生せず（$r_\tau = 0$ for $\tau < T_{\text{end}}$），数式が完成した最終ステップ $T_{\text{end}}$ においてのみ報酬 $R$ が得られる（スパース報酬）．このため、価値関数は「現在の書きかけの数式がどの程度有望か」を評価する重要な羅針盤の役割を果たす．
+
+TD誤差（Temporal Difference Error）$\delta_\tau$ は以下のように定義される（割引率 $\gamma = 1$ とする）．
+\begin{equation}
+    \delta_\tau = r_\tau + \gamma V_\phi(s_{\tau+1}) - V_\phi(s_\tau) =
+    \begin{cases}
+    V_\phi(s_{\tau+1}) - V_\phi(s_\tau) & \text{if } \tau < T_{\text{end}} \\
+    R - V_\phi(s_\tau) & \text{if } \tau = T_{\text{end}}
+    \end{cases}
+\end{equation}
+
+\subsubsection*{アドバンテージ $\hat{A}_\tau$ の役割}
+アドバンテージ関数 $\hat{A}_\tau$ は、実際に選択された行動 $a_\tau$（トークン）が、平均的な期待（価値関数の予測）と比較して**「どれだけ優れていたか」**を定量化するものである．
+\begin{itemize}
+  \item $\hat{A}_\tau > 0$: そのトークン選択は期待以上であり、推奨されるべきである（確率を上げる）．
+  \item $\hat{A}_\tau < 0$: そのトークン選択は期待外れであり、避けるべきである（確率を下げる）．
+\end{itemize}
+
+一般化アドバンテージ推定量（GAE）$\hat{A}_\tau$ は以下のように計算される．
+\begin{equation}
+    \hat{A}_\tau = \sum_{l=0}^{T_{\text{end}}-\tau} (\gamma \lambda)^l \delta_{\tau+l}
+\end{equation}
+ここで $\lambda \in [0, 1]$ はバイアスと分散のトレードオフを調整するハイパーパラメータである．
+
+\subsection{PPOによるパラメータ更新}
+収集されたエピソードデータ（軌跡 $\mathcal{T}$ と報酬 $R$）を用いて，以下の目的関数を最大化するようにパラメータ $\theta$ を更新する．
+
+\begin{equation}
+    L^{CLIP}(\theta) = \mathbb{E} \left[ \min(r_\tau(\theta)\hat{A}_\tau, \text{clip}(r_\tau(\theta), 1-\epsilon, 1+\epsilon)\hat{A}_\tau) \right]
+\end{equation}
+
+ここで，$\hat{A}_\tau$ は前述の通り計算されたGAEである．$r_\tau(\theta)$ は新旧方策の確率比である．
+
+\section{統合アルゴリズム定義}
+
+以下に，前述の各処理を統合したアルゴリズム定義を示す．
+
+\subsection{Algorithm 1: 増分的ポートフォリオ最適化}
+
+\begin{algorithm}[H]
+\caption{増分的ポートフォリオ最適化 (Incremental Optimization)}
+\begin{algorithmic}[1]
+\Require 既存アルファ集合 $\mathcal{F} = \{f_1, \dots, f_k\}$，重み $\bm{w}$，新規候補 $f_{\text{new}}$
+\Require 最大プール数 $K_{\max}$，学習率 $\eta$，勾配更新ステップ数 $N_{steps}$
+\Ensure 更新された集合 $\mathcal{F}^*$，重み $\bm{w}^*$
+
+\State \textbf{Step 1: 評価と統計量の計算 (Evaluation)}
+\State 検証データで $f_{\text{new}}$ のシグナル $\bm{z}_{\text{new}}$ を計算
+\State 単体ICの計算: $b_{\text{new}} \leftarrow \text{Mean}(\bm{z}_{\text{new}} \cdot \bm{y})$ \Comment{ベクトル内積の平均}
+\State 既存因子との相関計算: $\bm{c}_{\text{new}} \in \mathbb{R}^k$，ここで $c_j = \text{Mean}(\bm{z}_{\text{new}} \cdot \bm{z}_j)$
+
+\State \textbf{Step 2: 行列の拡張 (Expansion)}
+\State ICベクトルを拡張: $\bm{b} \leftarrow [\bm{b}; b_{\text{new}}]$
+\State 相関行列を拡張:
+$$
+\bm{\Sigma} \leftarrow \begin{bmatrix}
+\bm{\Sigma} & \bm{c}_{\text{new}} \\
+\bm{c}_{\text{new}}^\top & 1.0
+\end{bmatrix}
+$$
+\State 重みベクトルの初期化: $\bm{w} \leftarrow [\bm{w}; 0.0]$ \Comment{新規因子は重み0からスタート}
+\State $\mathcal{F} \leftarrow \mathcal{F} \cup \{f_{\text{new}}\}$
+
+\State \textbf{Step 3: 勾配法による最適化 (Gradient Descent)}
+\For{$step = 1$ to $N_{steps}$}
+    \State 勾配計算: $\nabla \mathcal{L} \leftarrow 2 \bm{\Sigma} \bm{w} - 2 \bm{b}$ \Comment{定理3.1より導出}
+    \State 重み更新: $\bm{w} \leftarrow \bm{w} - \eta \nabla \mathcal{L}$
+\EndFor
+
+\State \textbf{Step 4: プルーニング (Pruning)}
+\If{$|\mathcal{F}| > K_{\max}$}
+    \State 寄与度が最小の因子を特定: $p = \arg\min_i |w_i|$
+    \State $\bm{\Sigma}$ と $\bm{b}$ から $p$番目の行/列を削除
+    \State $\bm{w}$ と $\mathcal{F}$ から $p$番目の要素を削除
+\EndIf
+
+\State \Return $\mathcal{F}, \bm{w}$
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{Algorithm 2: 強化学習マイニングループ (PPO)}
+
+\begin{algorithm}[H]
+\caption{強化学習によるアルファ探索 (Alpha Mining PPO Loop)}
+\begin{algorithmic}[1]
+\State 方策 $\pi_\theta$ と 価値関数 $V_\phi$ を初期化
+\State アルファプール $\mathcal{F} = \emptyset$，重み $\bm{w} = \emptyset$ を初期化
+\State リプレイバッファ $\mathcal{D} \leftarrow \emptyset$
+
+\For{$iteration = 1$ to $N_{iter}$}
+    \State \textbf{// フェーズ1: データ収集 (Data Collection)}
+    \For{$ep = 1$ to $N_{episodes}$}
+        \State $s_0 \leftarrow [\texttt{BEG}]$，生成ステップ $\tau \leftarrow 0$
+        \State $\mathcal{T} \leftarrow []$ (軌跡)
+        \While{$a_\tau \neq \texttt{SEP}$ and $\tau < T_{\text{maxlen}}$}
+            \State 行動選択: $a_\tau \sim \pi_\theta(\cdot | s_\tau)$ \Comment{無効アクションマスク適用}
+            \State 状態更新: $s_{\tau+1} \leftarrow [s_\tau, a_\tau]$
+            \State $\mathcal{T}.\text{append}(s_\tau, a_\tau)$
+            \State $\tau \leftarrow \tau + 1$
+        \EndWhile
+        
+        \State 数式変換: $f_{\text{new}} \leftarrow \text{Parse}(\mathcal{T})$
+        \If{$f_{\text{new}}$ is valid}
+            \State 更新前のプールを保存: $\mathcal{F}_{\text{old}} \leftarrow \mathcal{F}$
+            \State \textbf{Algorithm 1 を実行}: $\mathcal{F}, \bm{w} \leftarrow \text{Algorithm 1}(\mathcal{F}, \bm{w}, f_{\text{new}})$
+            \State 報酬計算 (限界貢献分):
+            $$ R \leftarrow \text{IC}(c(\cdot; \mathcal{F}, \bm{w})) - \text{IC}(c(\cdot; \mathcal{F}_{\text{old}}, \bm{w}_{\text{old}})) $$
+        \Else
+            \State $R \leftarrow -1.0$ \Comment{無効な数式へのペナルティ}
+        \EndIf
+        
+        \State データ保存: Store $(\mathcal{T}, R)$ in $\mathcal{D}$
+    \EndFor
+    
+    \State \textbf{// フェーズ2: PPOパラメータ更新 (PPO Update)}
+    \State GAE (Generalized Advantage Estimation) によりアドバンテージ $\hat{A}_\tau$ を計算
+    \For{$epoch = 1$ to $K_{epochs}$}
+        \State 方策更新 ($\theta$): $L^{CLIP}(\theta)$ を最大化 (クリッピング付き)
+        \State 価値関数更新 ($\phi$): $L^{VF}(\phi) = (V_\phi(s_\tau) - R)^2$ を最小化
+    \EndFor
+    \State $\mathcal{D} \leftarrow \emptyset$ \Comment{バッファクリア}
+\EndFor
+\end{algorithmic}
+\end{algorithm}
+
+\section{結論}
+本実装仕様書では，強化学習を用いた相乗的アルファ生成フレームワークの全容を記述した．
+特に，\textbf{定理3.1を用いた高速なポートフォリオ更新}と，\textbf{無効アクションマスキングを用いた厳密な数式生成}の組み合わせが，本システムの競争優位性の源泉である．
+これにより，従来の人手による探索や単純な遺伝的アルゴリズムでは到達困難な，複雑かつ分散効果の高いファクター空間を探索することが可能となる．
+
+\end{document}
