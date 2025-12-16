@@ -1,0 +1,479 @@
+% --- UNIVERSAL PREAMBLE BLOCK ---
+\documentclass[11pt, a4paper]{article}
+\usepackage[a4paper, top=2.5cm, bottom=2.5cm, left=2cm, right=2cm]{geometry}
+\usepackage{fontspec}
+
+% Babel setup for Japanese and English
+\usepackage[japanese, bidi=basic, provide=*]{babel}
+\babelprovide[import, onchar=ids fonts]{japanese}
+\babelprovide[import, onchar=ids fonts]{english}
+
+% Set default/Latin font to Sans Serif in the main (rm) slot
+\babelfont{rm}{Noto Sans}
+% Assign a specific font for Japanese text
+\babelfont[japanese]{rm}{Noto Sans CJK JP}
+
+% Add because main language is not English
+\usepackage{enumitem}
+\setlist[itemize]{label=-}
+
+% --- PACKAGES FOR MATH & FIGURES ---
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{amsthm}
+\usepackage{mathtools}
+\usepackage{booktabs}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{graphicx}
+\usepackage{bm}
+\usepackage{float} % [H] option requires this package
+
+% --- THEOREMS ---
+\newtheorem{theorem}{定理}
+\newtheorem{definition}{定義}
+\newtheorem{lemma}{補題}
+\newtheorem{proposition}{命題}
+\newtheorem{corollary}{系}
+
+% --- ALGORITHM CUSTOMIZATION ---
+\algrenewcommand\algorithmicrequire{\textbf{入力:}}
+\algrenewcommand\algorithmicensure{\textbf{出力:}}
+\algrenewcommand\algorithmiccomment[1]{\hfill // #1}
+
+% --- TITLE INFO ---
+\title{\textbf{深層強化学習による数式アルファ生成と重回帰モデルの数理的比較：\\損失関数の導出と相乗効果の理論}}
+\author{Quantitative Research Division}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+本稿では、多数の基本ファクター（BP, ROA等）を入力とし、次月の株式リターンを予測するタスクにおいて、古典的な「重回帰モデル（OLS）」と、深層強化学習（RL）を用いた「数式生成モデル」を数理的な観点から詳細に比較する。特に、提案手法における損失関数の導出過程を省略なしに記述し、平均二乗誤差（MSE）の最小化が、数理的に「予測精度の最大化」と「アルファ間相関の抑制」に分解されることを示す。また、ランク変換されたデータに対するMSE最小化がスピアマン順位相関の最大化と等価であることを証明するとともに、今回の金融データ設定において、Rank ICの採用が学習の安定性と収束速度に決定的な影響を与えることを、勾配の分散と感度解析を用いて数理的に証明する。
+\end{abstract}
+
+\section{序論：クオンツ運用における予測モデルの課題}
+
+クオンツ運用において、ファンダメンタルズ指標やテクニカル指標を用いて次月のリターンを予測することは中心的な課題である。しかし、金融市場データはS/N比が低く、ファクター間の関係は非線形かつ動的である。
+
+本稿では、以下の具体的な設定の下で議論を進める。
+\begin{itemize}
+    \item \textbf{入力 ($X$)}: 企業の財務指標（BP: Book-to-Price, ROA: Return on Assets）、価格モメンタム、出来高変動率など、計47種類の基本ファクター。
+    \item \textbf{出力 ($y$)}: 各銘柄の次月（$t+1$）のリターン。
+\end{itemize}
+
+比較対象として、最も基本的かつ堅牢な「重回帰モデル（OLS）」と、非線形な相互作用（例: $\text{BP} \times \log(\text{Momentum})$）を自動探索可能な「RLベースの数式生成モデル」を取り上げ、その数理的構造の違いを明らかにする。
+
+\section{問題の定式化}
+
+\subsection{データ構造と正規化}
+投資ユニバースを構成する銘柄数を $n$、時点 $t$ における基本ファクター行列を $X_t \in \mathbb{R}^{n \times d}$ とする。
+例えば、銘柄 $i$ のBPは $x_{t,i}^{(\text{BP})}$、ROAは $x_{t,i}^{(\text{ROA})}$ と表される。
+
+ターゲット変数 $y_{t+1} \in \mathbb{R}^n$ は、時点 $t$ から $t+1$ にかけてのクロスセクションリターンである。実務上の比較可能性を担保するため、以下の正規化演算子 $\mathcal{N}$ を定義する。
+
+\begin{definition}[Cross-Sectional Normalization]
+任意のベクトル $u \in \mathbb{R}^n$ に対し、演算子 $\mathcal{N}$ を以下のように定義する。
+\begin{equation}
+    [\mathcal{N}(u)]_i = \frac{u_i - \mu_u}{\sigma_u}
+\end{equation}
+ここで $\mu_u$ は銘柄間平均、$\sigma_u$ は銘柄間標準偏差である。本稿では、全てのシグナルおよびターゲット $y$ はこの正規化が施されており、平均0、分散1を持つと仮定する。
+\end{definition}
+
+\section{ベンチマーク：重回帰モデル (OLS) の詳細}
+
+\subsection{モデルの定式化}
+重回帰モデルは、次月リターン $y_{t+1,i}$ に対して以下の線形構造を仮定する。
+\begin{equation}
+    y_{t+1,i} = \beta_0 + \beta_{\text{BP}} x_{t,i}^{(\text{BP})} + \beta_{\text{ROA}} x_{t,i}^{(\text{ROA})} + \dots + \epsilon_{t,i}
+\end{equation}
+ベクトル表記では $\hat{\bm{y}} = \bm{X}\bm{\beta}$ と書ける。
+
+\subsection{パラメータ推定と限界}
+OLSは残差平方和 $J(\bm{\beta}) = \| \bm{y} - \bm{X}\bm{\beta} \|^2$ を最小化する $\bm{\beta}^*$ を求める。
+正規方程式 $\bm{\beta}^* = (\bm{X}^\top \bm{X})^{-1} \bm{X}^\top \bm{y}$ により解が得られるが、以下の限界がある。
+
+\begin{enumerate}
+    \item \textbf{多重共線性 (Multicollinearity)}: BPとROAなどは経済的に相関しやすく、行列 $\bm{X}^\top \bm{X}$ の逆行列計算が不安定になり、係数 $\beta$ の分散が増大する。
+    \item \textbf{非線形性の欠如}: 「ROAが高い銘柄においてのみ、BPの効果が顕著になる」といった相互作用（$x^{(\text{ROA})} \times x^{(\text{BP})}$）を捉えられない。
+\end{enumerate}
+
+\section{提案手法：強化学習による相乗的アルファ生成}
+
+本手法では、基本ファクター（BP, ROA等）を「素材」とし、四則演算や数学関数（$\sin, \log$等）を用いて非線形変換を施した新たなアルファ因子（数式）を生成する。生成された $K$ 個のアルファ因子 $\{f_1, \dots, f_K\}$ を線形結合して最終モデルとする。
+\begin{equation}
+    z(\bm{x}) = \sum_{k=1}^K w_k f_k(\bm{x})
+\end{equation}
+
+\subsection{損失関数の導出：MSEからICと相関への分解}
+本手法の核心は、ポートフォリオ全体の予測性能を最大化するための損失関数の設計にある。
+目的関数 $\mathcal{L}(\bm{w})$ を、結合モデルの予測値 $z$ とターゲット $y$ の平均二乗誤差（MSE）とする。
+
+\begin{equation}
+    \mathcal{L}(\bm{w}) = \frac{1}{T} \sum_{t=1}^T \| \bm{z}_t - \bm{y}_t \|^2
+\end{equation}
+
+以下に、この単純なMSEが「個別の予測力(IC)」と「アルファ間の相関」に分解される過程を示す。
+
+\subsubsection*{導出プロセス}
+正規化の仮定により、$\|\bm{y}_t\|^2 \approx 1$ （定数）とみなせる。損失関数を展開する。
+\begin{align}
+    \mathcal{L}(\bm{w}) &= \mathbb{E}_t \left[ \| \sum_{i=1}^K w_i f_i(\bm{x}_t) - \bm{y}_t \|^2 \right] \nonumber \\
+    &= \mathbb{E}_t \left[ \left\langle \sum_i w_i f_i - \bm{y}, \sum_j w_j f_j - \bm{y} \right\rangle \right] \nonumber \\
+    &= \mathbb{E}_t \left[ \sum_i \sum_j w_i w_j \langle f_i(\bm{x}_t), f_j(\bm{x}_t) \rangle - 2 \sum_i w_i \langle f_i(\bm{x}_t), \bm{y}_t \rangle + \langle \bm{y}_t, \bm{y}_t \rangle \right]
+\end{align}
+ここで、各項の期待値を以下の統計量として定義する。
+
+\begin{itemize}
+    \item \textbf{IC (Information Coefficient)}: アルファ $i$ の予測精度。
+    \begin{equation}
+        b_i = \mathbb{E}_t [\langle f_i(\bm{x}_t), \bm{y}_t \rangle]
+    \end{equation}
+    日本語訳: 生成された数式 $f_i$（例: $\text{BP} / \text{ROA}$）と次月リターン $y$ との内積（相関）。
+
+    \item \textbf{アルファ間相関行列}: アルファ $i$ と $j$ の類似度。
+    \begin{equation}
+        \Sigma_{ij} = \mathbb{E}_t [\langle f_i(\bm{x}_t), f_j(\bm{x}_t) \rangle]
+    \end{equation}
+    日本語訳: 生成された数式同士の相関。例えば $f_1 = \text{BP}$ と $f_2 = \text{BookValue} / \text{MarketCap}$ は非常に似通っており、$\Sigma_{12} \approx 1.0$ となる。
+\end{itemize}
+
+定数項を無視すると、損失関数は以下の二次形式（Quadratic Form）に帰着する。
+\begin{equation}
+    \mathcal{L}(\bm{w}) \propto \bm{w}^\top \bm{\Sigma} \bm{w} - 2 \bm{w}^\top \bm{b}
+\end{equation}
+
+\subsubsection*{この数式の意味}
+この損失関数を最小化することは、以下のバランスを取ることを意味する。
+\begin{enumerate}
+    \item \textbf{$-2 \bm{w}^\top \bm{b}$ の最小化}: ICベクトル $\bm{b}$ が大きい（予測力が高い）アルファに大きな重み $w$ を与える。
+    \item \textbf{$\bm{w}^\top \bm{\Sigma} \bm{w}$ の最小化}: 相互相関 $\bm{\Sigma}$ が大きいアルファ同士に同時に大きな重みを与えない（分散投資効果）。
+\end{enumerate}
+これにより、モデルは「BPと似た予測しかしない数式」を排除し、「既存のBPベースのモデルが苦手な局面を補完できる新しい数式（例: ROAベース）」を探索するよう動機づけられる。これが\textbf{「相乗効果 (Synergy)」}の正体である。
+
+\subsubsection*{補足：「相関 -1 の方が良いのでは？」という直感への数理的反論}
+ここで、「ポートフォリオ効果（分散投資）の観点からは、相関が -1 に近いものを組み合わせるのが最良ではないか？」という疑問が生じるかもしれません。これは非常に鋭い指摘ですが、予測モデルの文脈においては、\textbf{「相関 0（直交）の因子が最良であり、相関 -1 は無価値（冗長）」}という結論になります。
+
+その理由は、\textbf{「重み $w$ の符号最適化」}と\textbf{「ベクトルの幾何学的制約」}の2点から説明できます。
+
+\paragraph{1. 幾何学的な矛盾（"良い"因子同士は逆相関になれない）}
+まず、ターゲットベクトル $\bm{y}$ と高い正の相関（IC $> 0$）を持つ「良い因子」同士を考えます。
+因子 $\bm{f}_1$ が $\bm{y}$ に近く、因子 $\bm{f}_2$ も $\bm{y}$ に近いなら、必然的に $\bm{f}_1$ と $\bm{f}_2$ は「似た方向」を向くため、正の相関を持ちます。
+逆に、もし $\bm{f}_1$ と $\bm{f}_2$ が完全な逆相関（$\rho \approx -1$）であれば、$\bm{f}_1$ が $\bm{y}$ と同じ方向なら、$\bm{f}_2$ は $\bm{y}$ と逆方向（IC $< 0$）を向いていることになり、予測因子としての性能が相反してしまいます。
+
+\paragraph{2. 重み最適化による「符号の反転」}
+仮に $\bm{f}_1$ は正の予測力（IC $> 0$）、$\bm{f}_2$ は負の予測力（IC $< 0$、つまり $\bm{y}$ と逆相関）を持つとします。このとき $\bm{f}_1$ と $\bm{f}_2$ の間の相関は負（$\rho_{12} < 0$）になりそうです。
+しかし、損失関数を最小化する際、モデルは重み $w$ の符号を自由に調整できます。
+\begin{itemize}
+    \item $\bm{f}_1$ は正の相関なので、重み $w_1 > 0$
+    \item $\bm{f}_2$ は負の相関なので、予測に使うために重みを反転： $w_2 < 0$
+\end{itemize}
+すると、ペナルティ項 $\sum w_i w_j \rho_{ij}$ の符号は以下のようになります。
+\begin{align}
+    \text{項の符号} &= (\text{正の}w_1) \times (\text{負の}w_2) \times (\text{負の相関}\rho_{12}) \nonumber \\
+    &= (+) \times (-) \times (-) \nonumber \\
+    &= \mathbf{(+)} \quad \text{（正の値＝コスト増）}
+\end{align}
+つまり、重みがマイナスになることで「逆相関のマイナス」が打ち消され、結局ペナルティ項はプラスに寄与してしまいます。
+
+\paragraph{3. 数理的な証明（相関0 vs 相関-1）}
+より厳密に、2つの因子を用いて「無相関（直交）」と「逆相関」のどちらが損失を小さくするか比較します。
+目的関数（最小化したい値）：
+\begin{equation}
+    \mathcal{L} = \underbrace{w_1^2 + w_2^2 + 2w_1 w_2 \rho_{12}}_{\text{分散項}} - 2 \underbrace{(w_1 b_1 + w_2 b_2)}_{\text{IC項}}
+\end{equation}
+（簡単のため分散1、ICを $b_1, b_2$ とします）
+
+\begin{itemize}
+    \item \textbf{ケースA：完全な逆相関 ($\rho_{12} = -1$)} \\
+    この場合、幾何学的に $f_2 = -f_1$ となり、ICも $b_2 = -b_1$ となります。$f_2$ は $f_1$ と同じ情報しか持っていない（冗長）状態です。最適化すると実質的に「$f_1$ だけを使う」のと同じ結果になります。
+    最適な損失値は：
+    \begin{equation}
+        \mathcal{L}_{\text{min}} = 1 - b_1^2
+    \end{equation}
+
+    \item \textbf{ケースB：無相関 ($\rho_{12} = 0$)} \\
+    この場合、$f_1$ と $f_2$ は独立した情報を持ちます（$b_1 > 0, b_2 > 0$ と仮定）。ペナルティ項の $2w_1 w_2 \rho_{12}$ が消えるため、純粋に両方のICの恩恵を受けられます。
+    最適な損失値は：
+    \begin{equation}
+        \mathcal{L}_{\text{min}} = 1 - (b_1^2 + b_2^2)
+    \end{equation}
+\end{itemize}
+
+\textbf{結論:}
+\begin{equation}
+    (1 - b_1^2 - b_2^2) < (1 - b_1^2)
+\end{equation}
+であるため、無相関（直交）の方が、損失関数は小さくなります。
+したがって、モデルは数理的に**「相関 0（直交）」を目指す方向**に最適化されます。
+
+\section{アルファ生成器と強化学習 (PPO) の詳細}
+
+\subsection{モデルアーキテクチャの定義}
+本実装では、Actor（方策）とCritic（価値関数）が埋め込み層とLSTM層を共有するネットワーク `AlphaGeneratorNet` を採用する。
+
+\begin{itemize}
+    \item \textbf{Embedding層}: 入力トークンIDを $D_{emb}=128$ 次元のベクトルに変換。
+    \item \textbf{LSTM層}: 3層構造、隠れ層次元 $D_{hidden}=128$。数式の文脈（時系列依存性）を学習する。
+    \item \textbf{Actorヘッド}: LSTMの最終出力を受け取り、3層のMLP（隠れ層64次元、活性化関数Tanh）を経て、次のトークンの生成確率を出力する。
+    \item \textbf{Criticヘッド}: Actorと同様にLSTMの最終出力を受け取り、3層のMLP（隠れ層64次元、活性化関数Tanh）を経て、状態価値（スカラー）を出力する。
+\end{itemize}
+
+\subsection{LSTM隠れ状態ベクトル $h_t$ の役割と定義}
+$h_t$（隠れ状態ベクトル）は、これまで生成されたトークン列の「文脈（Context）」と「履歴（History）」を固定長ベクトルに圧縮した記憶装置である。
+数理的には、時刻 $t$ における入力トークン $x_t$ と、前時刻の状態 $h_{t-1}$ から再帰的に更新される。
+\begin{equation}
+    h_t = \text{LSTM}(x_t, h_{t-1})
+\end{equation}
+このベクトルは以下の重要な役割を担う。
+\begin{itemize}
+    \item \textbf{文脈の保持}: 「現在は加算演算子の第一引数を入力中である」といった構文的な状態を暗黙的にエンコードする。
+    \item \textbf{情報の圧縮}: $(y_1, \dots, y_t)$ という可変長の数式シーケンスを、固定次元（$128$次元）の特徴空間へマッピングする。
+    \item \textbf{判断の基盤}: Actorはこの $h_t$ を基に「文法的に正しく、かつ報酬が高くなる次のトークン」を選択し、Criticはこの $h_t$ を基に「最終的な予測スコア（期待報酬）」を算出する。
+\end{itemize}
+
+\subsection{報酬設計: 限界貢献分 (Marginal Contribution)}
+生成された新しい数式 $f_{\text{new}}$ に対する報酬 $R$ は、既存のポートフォリオ $\mathcal{F}_{\text{old}}$ にそれを加えたときのICの向上分とする。
+\begin{equation}
+    R(f_{\text{new}}) = \text{IC}(\text{Combine}(\mathcal{F}_{\text{old}} \cup \{f_{\text{new}}\})) - \text{IC}(\text{Combine}(\mathcal{F}_{\text{old}}))
+\end{equation}
+もし $f_{\text{new}}$ が既存の因子（例: BP）と相関が高ければ、上記損失関数の $\bm{\Sigma}$ ペナルティ項によりウェイトが低く抑えられるため、ポートフォリオ全体のIC向上（報酬）は小さくなる。逆に、既存因子と無相関で予測力がある因子は高い報酬を得る。
+
+\subsection{PPO (Proximal Policy Optimization) の適用}
+目的関数にはクリッピングを用いたPPOを採用する。
+\begin{equation}
+    L^{CLIP}(\theta) = \mathbb{E}_t \left[ \min(r_t(\theta)\hat{A}_t, \text{clip}(r_t(\theta), 1-\epsilon, 1+\epsilon)\hat{A}_t) \right]
+\end{equation}
+\begin{itemize}
+    \item $r_t(\theta)$: 新旧方策の確率比 $\frac{\pi_\theta(a_t|s_t)}{\pi_{\theta_{old}}(a_t|s_t)}$。
+    \item $\hat{A}_t$: アドバンテージ関数。実装上は単純化のため、報酬の正規化値と予測価値の差分を用いる。
+    \item $\text{clip}$: 更新幅を一定範囲（$\epsilon=0.2$）に制限し、学習の安定化を図る。
+\end{itemize}
+
+\subsection{Criticネットワークの定義と計算詳細}
+Critic（価値関数 $V_\phi(s_t)$）は、パラメータ $\phi$ を持つニューラルネットワークであり、現在の状態 $s_t$（生成途中の数式）から、エピソード終了時に得られる期待報酬を推定する。
+
+\subsubsection{数学的定義と学習ターゲット}
+一般的な強化学習において、状態価値関数は割引報酬和の期待値として定義される。
+\begin{equation}
+    V_{\phi}(s_t) = \mathbb{E}_{\pi_\theta} \left[ \sum_{k=0}^{T_{end}-t} \gamma^k r_{t+k} \Bigg| s_t \right]
+\end{equation}
+本タスクでは、数式完成時（$t=T_{end}$）にのみ報酬 $R$（IC向上分）が与えられ、途中の報酬は $0$ である。また、本実装では割引率 $\gamma = 1.0$ を採用している。
+したがって、すべてのステップ $t$ において、価値関数の意味は以下のように単純化される。
+\begin{equation}
+    V_{\phi}(s_t) \approx \mathbb{E}_{\pi_\theta} [ R \mid s_t ]
+\end{equation}
+すなわち、$V_\phi(s_t)$ は「現在作成中の数式 $s_t$ が、最終的にどれだけのスコア（ポートフォリオICへの貢献分）を叩き出すか」の予測値である。
+
+\subsubsection{ネットワーク構造による計算}
+具体的には、LSTMエンコーダーの出力ベクトル $\bm{h}_t$ を入力とする多層パーセプトロン（MLP）として実装される。
+本コードの実装に準拠すると、2層の隠れ層（次元数64）とTanh活性化関数を持つ構造となる。
+\begin{equation}
+    V_\phi(s_t) = \bm{W}_3 \cdot \tanh(\bm{W}_2 \cdot \tanh(\bm{W}_1 \bm{h}_t + \bm{b}_1) + \bm{b}_2) + b_3
+\end{equation}
+ここで $\phi = \{\bm{W}_{1,2,3}, \bm{b}_{1,2,3}\}$ はCriticの学習パラメータである。
+Criticはこの予測値 $V_\phi(s_t)$ と、実際に得られた報酬 $R$ との二乗誤差（MSE）を最小化するように学習される。
+
+\section{Rank IC (スピアマン相関) とMSEの関係証明}
+
+金融データは外れ値を含むため、値を順位（ランク）に変換してから分析することが多い。ここでは、「ランクデータのMSE最小化」が「スピアマン相関最大化」と等価であることを証明し、さらに「ピアソン相関（通常IC）」と「スピアマン相関（Rank IC）」が数理的に異なる指標であることを一般形式で証明する。
+
+\subsection{Rank MSE最小化とRank IC最大化の等価性証明}
+\begin{theorem}
+ベクトル $\bm{x}, \bm{y} \in \mathbb{R}^n$ をランク変換し標準化したものを $\bm{r}_x, \bm{r}_y$ とする。このとき、MSEの最小化はスピアマン順位相関 $\rho_s$ の最大化と等価である。
+\end{theorem}
+
+\begin{proof}
+ランクベクトル $\bm{r}_x, \bm{r}_y$ は $\{1, \dots, n\}$ の置換から成るため、その二乗ノルム（長さ）は定数 $C$ である。
+\begin{equation}
+    \| \bm{r}_x \|^2 = \| \bm{r}_y \|^2 = C \quad (\text{定数})
+\end{equation}
+MSEを展開すると、
+\begin{align}
+    \text{MSE}(\bm{r}_x, \bm{r}_y) &= \frac{1}{n} \| \bm{r}_x - \bm{r}_y \|^2 \nonumber \\
+    &= \frac{1}{n} \left( \| \bm{r}_x \|^2 + \| \bm{r}_y \|^2 - 2 \langle \bm{r}_x, \bm{r}_y \rangle \right) \nonumber \\
+    &= \frac{1}{n} (2C - 2 \langle \bm{r}_x, \bm{r}_y \rangle)
+\end{align}
+ここで、定義よりスピアマン順位相関係数は $\rho_s = \frac{1}{C} \langle \bm{r}_x, \bm{r}_y \rangle$ （係数は正規化依存）であるため、
+\begin{equation}
+    \text{MSE} \propto \text{Const} - 2 \rho_s
+\end{equation}
+となる。したがって、MSEを最小化することは $-2\rho_s$ を最小化、すなわち $\rho_s$ を最大化することと完全に等価である。
+\end{proof}
+
+\subsection{ピアソンICとRank ICの数理的差異の一般証明}
+損失関数のIC項（$b_i$）において、生の予測値を用いる場合（ピアソン相関 $\rho_p$）とランクを用いる場合（スピアマン相関 $\rho_s$）では、得られる評価が根本的に異なることを示す。
+
+\begin{proposition}
+確率変数 $X, Y$ が確率1で線形関係にない限り（すなわち非線形な関係を含む場合）、一般にピアソン相関係数 $\rho_p$ とスピアマン順位相関係数 $\rho_s$ は一致しない。
+\end{proposition}
+
+\begin{proof}
+定義より、ピアソン相関 $\rho_p$ は線形変換 $L(x) = ax+b$ に対して不変であり、スピアマン相関 $\rho_s$ は単調増加変換 $M(x)$（$x_i < x_j \Rightarrow M(x_i) < M(x_j)$）に対して不変である。
+
+ここで、非線形な単調増加関数 $f$（例: $f(x) = x^3$）を考え、ターゲット変数が予測値の非線形変換 $Y = f(X)$ で生成されているとする。
+
+\begin{enumerate}
+    \item \textbf{スピアマン相関の場合:}
+    $f$ は単調増加であるため、順位は保存される。すなわち $\text{Rank}(Y) = \text{Rank}(f(X)) = \text{Rank}(X)$ である。したがって、ランク空間では完全な相関を持つ。
+    \begin{equation}
+        \rho_s(X, Y) = \rho_p(\text{Rank}(X), \text{Rank}(Y)) = 1.0
+    \end{equation}
+
+    \item \textbf{ピアソン相関の場合:}
+    $\rho_p(X, Y)$ は $X$ と $Y$ の線形依存性を測る。$Y = f(X)$ が非線形であるため、最小二乗法による直線近似は完全には当てはまらない。したがって、
+    \begin{equation}
+        |\rho_p(X, Y)| < 1.0
+    \end{equation}
+    例えば $X \sim \mathcal{N}(0, 1), Y = X^3$ の場合、$\rho_p \approx 0.77$ となる。
+\end{enumerate}
+
+\textbf{結論:}
+一般に $\rho_p(X, Y) \neq \rho_s(X, Y)$ である。
+これは、損失関数のIC項 $b_i$ を計算する際、ピアソン相関を用いると「線形な予測力」のみが評価され、スピアマン相関を用いると「非線形でも単調な予測力」が評価されることを意味する。特に外れ値（非線形なテール）が多い金融データにおいて、この差異はモデルの最適化方向に重大な影響を与える。
+\end{proof}
+
+\subsection{学習ダイナミクスへの影響：勾配の感度解析による証明}
+本節では、金融データ特有の「ファットテール（重い裾）」を持つ環境下で、ピアソン相関（通常IC）を用いると学習が不安定化し、Rank IC（スピアマン）を用いると安定化することを、損失関数の勾配 $\nabla_{\bm{w}} \mathcal{L}$ の感度（Influence Function）を用いて数理的に証明する。
+
+\begin{theorem}[勾配の有界性]
+ターゲット変数 $y$ に無限大への発散を含む外れ値（$\Lambda \to \infty$）が存在する場合、ピアソン相関に基づく損失関数の勾配は発散する（有界でない）が、Rank ICに基づく勾配は有界であり、ロバストである。
+\end{theorem}
+
+\begin{proof}
+損失関数の勾配は $\nabla_{\bm{w}} \mathcal{L} = 2\bm{\Sigma}\bm{w} - 2\bm{b}$ で与えられる。学習の安定性を支配するのは、ターゲット変数 $y$ に依存する ICベクトル $\bm{b}$ の挙動である。
+サンプルサイズを $N$ とし、ある時点 $t$ において、1つの観測点 $k$ に極端な外れ値 $y_k = \Lambda$ （$\Lambda \gg 1$）が混入した状況を考える。他のデータ点 $i \neq k$ は正常な範囲にあるとする。
+
+\textbf{1. ピアソン相関（通常IC）の脆弱性:}
+ピアソン相関に基づくIC推定量 $b_{\text{Pearson}}$ は、積率相関として以下のように展開される。
+\begin{align}
+    b_{\text{Pearson}} &= \frac{1}{N-1} \sum_{i=1}^N \hat{f}_i \hat{y}_i \quad (\hat{\cdot} \text{は標準化済み}) \nonumber \\
+    &\approx \frac{1}{N} \left( \sum_{i \neq k} f_i y_i + f_k \Lambda \right)
+\end{align}
+ここで、$f_k$ が 0 でない限り、
+\begin{equation}
+    \lim_{\Lambda \to \infty} | b_{\text{Pearson}} | = \infty
+\end{equation}
+となる。
+これに伴い、損失関数の勾配ノルムも発散する。
+\begin{equation}
+    \| \nabla \mathcal{L}_{\text{Pearson}} \| \propto \| \bm{b}_{\text{Pearson}} \| \approx O(\Lambda)
+\end{equation}
+これは、たった1つの外れ値が勾配ベクトル全体を支配し、最適化の方向（Gradient Direction）を「外れ値を予測できる方向」へと強引にねじ曲げることを意味する。結果として、報酬 $R$ の分散 $Var(R)$ が $\Lambda^2$ のオーダーで増大し、PPOの学習は不安定化する。
+
+\textbf{2. Rank IC（スピアマン相関）のロバスト性:}
+一方、Rank ICを用いる場合、値 $y$ はまずランク $r(y)$ に変換される。
+外れ値 $y_k = \Lambda$ がどれほど大きくても、そのランク $r_k$ は最大ランク $N$ に固定される。
+\begin{equation}
+    y_k = \Lambda \xrightarrow{\text{Rank}} r_k = N
+\end{equation}
+正規化されたランク空間におけるIC推定量 $b_{\text{Rank}}$ は以下のようになる。
+\begin{equation}
+    b_{\text{Rank}} = \frac{1}{N} \sum_{i=1}^N \mathcal{N}(\text{Rank}(f_i)) \cdot \mathcal{N}(\text{Rank}(y_i))
+\end{equation}
+ランク変換された変数は常に一定の範囲（有界）に収まるため、
+\begin{equation}
+    | b_{\text{Rank}} | \le 1.0 \quad (\text{厳密に有界})
+\end{equation}
+したがって、勾配ノルムも常に定数 $C$ で抑えられる。
+\begin{equation}
+    \| \nabla \mathcal{L}_{\text{Rank}} \| \le C \ll O(\Lambda)
+\end{equation}
+これは、勾配が外れ値に対して不感（Robust）であり、データ全体の順序関係（大局的なトレンド）のみを反映して更新されることを保証する。
+
+\textbf{結論:}
+金融リターン $y$ がパレート指数 $\alpha < 2$ のファットテール分布（分散が無限大、または非常に大きい）に従うと仮定する。
+このとき、勾配の分散期待値について以下の決定的な差が生じる。
+\begin{equation}
+    \mathbb{E} [ \| \nabla \mathcal{L}_{\text{Pearson}} \|^2 ] \to \infty \quad \text{vs} \quad \mathbb{E} [ \| \nabla \mathcal{L}_{\text{Rank}} \|^2 ] < \infty
+\end{equation}
+Rank ICを採用することで、勾配の分散（ノイズ）を有界に保つことができる。これにより、PPOのアドバンテージ推定 $\hat{A}_t$ のSN比が劇的に改善し、エージェントはノイズではなく本質的なシグナル（BPやROAの構造的価値）を安定して学習できるようになる。
+\end{proof}
+
+\subsection{実務的スコアリングにおける損失関数の定量的乖離}
+本節では、今回のタスク（基本ファクターを用いた株式リターン予測）において、損失関数がどの程度変動しうるのか、その影響のオーダーを具体的な数式を用いて評価する。
+
+\subsubsection{市場ショック時の外れ値モデル}
+株式市場リターン $y$ は、通常は正規分布に近いが、市場ショック時（○○ショック等）には標準偏差 $\sigma$ の10倍以上の値動き（外れ値）が発生することが知られている。
+これをモデル化するため、リターン $y$ が以下の混合モデルに従うと仮定する。
+\begin{equation}
+    y \sim (1-\epsilon) \mathcal{N}(0, 1) + \epsilon \mathcal{N}(0, k^2)
+\end{equation}
+ここで、$k$ はショックの規模係数（例: $k=10 \sim 20$）、$\epsilon$ はショック発生確率である。
+
+\subsubsection{損失関数の値のスケール比較}
+予測モデル $z$ が標準正規分布 $\mathcal{N}(0, 1)$ に従う（正規化済み）と仮定し、極端な外れ値 $y_{\text{shock}} = k$ が観測された場合の、単一観測点における損失関数の寄与分 $\Delta \mathcal{L}$ を比較する。
+
+\textbf{1. ピアソン損失関数の増分:}
+ピアソン（MSE）基準の損失関数は二乗誤差に比例するため、
+\begin{equation}
+    \Delta \mathcal{L}_{\text{Pearson}} \approx (y_{\text{shock}} - z)^2 \approx (k - 0)^2 = k^2
+\end{equation}
+市場ショックが $10\sigma$ ($k=10$) の場合、損失値は $100$、 $20\sigma$ ($k=20$) の場合は $400$ に跳ね上がる。
+
+\textbf{2. ランク損失関数の増分:}
+ランク基準の場合、リターン全体を $[0, 1]$ または標準正規分布 $\mathcal{N}(0, 1)$ に強制的にマッピングする（分位点正規化）。
+外れ値 $y_{\text{shock}}$ は最大ランクとなるため、標準化ランク値 $r(y_{\text{shock}})$ はある定数 $C_{\text{max}}$（サンプリング数 $N$ に依存するが、正規分布の分位点であれば $C_{\text{max}} \approx 3 \sim 4$ 程度）に抑えられる。
+\begin{equation}
+    \Delta \mathcal{L}_{\text{Rank}} \approx (r(y_{\text{shock}}) - r(z))^2 \approx (C_{\text{max}} - 0)^2 \approx 3^2 = 9
+\end{equation}
+損失値はショックの規模 $k$ に依存せず、定数オーダーに留まる。
+
+\subsubsection{結論：影響度の定量的評価}
+以上のことから、損失関数の感度比（Sensitivity Ratio）は以下のように見積もれる。
+\begin{equation}
+    \frac{\Delta \mathcal{L}_{\text{Pearson}}}{\Delta \mathcal{L}_{\text{Rank}}} \approx \frac{k^2}{C_{\text{max}}^2} \propto k^2
+\end{equation}
+例えば $k=20$（リーマンショック級の個別株変動）の場合、この比率は $\frac{400}{9} \approx 44$ 倍となる。
+これは、ピアソン相関を用いると、たった一つの外れ値に対してモデルが \textbf{40倍以上過剰に反応し}、本来学習すべきファクター（BPやROAの長期的傾向）を破壊して、その外れ値だけに適合しようとする（Overfitting to outliers）ことを意味する。
+Rank ICの採用は、この過剰反応を数理的に防ぐ「安全装置」として機能し、安定したスコアリングモデルの構築を保証する。
+
+\section{アルゴリズムの全体像}
+
+最後に、強化学習とポートフォリオ最適化を統合したアルゴリズムを示す。
+
+\begin{algorithm}[H]
+\caption{RLによるアルファ探索と増分的最適化}
+\begin{algorithmic}[1]
+\Require 基本ファクター $X$ (BP, ROA等)，ターゲット $y$ (次月リターン)
+\State 方策 $\pi_\theta$、アルファプール $\mathcal{F} = \emptyset$ を初期化
+
+\For{$iteration = 1$ to $N$}
+    \State \textbf{1. 数式生成:}
+    \State LSTM方策 $\pi_\theta$ に従い、数式 $f_{\text{new}}$ を生成
+    \State 例: $f_{\text{new}} = \text{Rank}(\text{BP}) - \text{Rank}(\text{ROA})$
+
+    \State \textbf{2. 評価と更新:}
+    \State 検証用データでシグナル $\bm{z}_{\text{new}}$ を計算
+    \State 単体IC $b_{\text{new}}$ と既存因子との相関 $\bm{c}_{\text{new}}$ を計算
+    \State 行列 $\bm{\Sigma}$ とベクトル $\bm{b}$ を拡張し、勾配法で最適ウェイト $\bm{w}$ を更新
+    \State 報酬 $R = \Delta \text{Portfolio\_IC}$ を計算
+
+    \State \textbf{3. PPO学習:}
+    \State 報酬 $R$ を用いてアドバンテージ $\hat{A}$ を計算
+    \State クリティックとアクターのパラメータ $\theta$ を更新
+\EndFor
+\end{algorithmic}
+\end{algorithm}
+
+\section{結論：なぜ本手法が重回帰モデルを凌駕するのか}
+
+結論として、本手法が従来の重回帰モデル（OLS）に対して決定的な優位性を持ち、実市場において「勝てる」スコアリングを実現できる理由は、以下の3点に集約される。これらは単なる性能差ではなく、市場の動的な性質に適合するための構造的な必然性に基づいている。
+
+第一に、\textbf{「非線形な相互作用とレジームへの適応性（Context-Aware Nonlinearity）」}である。
+重回帰モデルは、「ファクターの効果は常に一定である（加法性）」という強い仮定に縛られている。しかし、実際の市場では、「BP（バリュー）は市場センチメントが悪化した時（レジームA）でのみ有効であり、強気相場（レジームB）ではモメンタムが支配的になる」といった条件付き確率（Conditional Probability）が支配的である。
+本手法においてLSTMが生成する数式は、例えば $ \text{If}(\text{VIX} > 20, \text{Rank}(\text{BP}), \text{Rank}(\text{Momentum})) $ のような、市場環境に応じた条件分岐（Gating Mechanism）を内包した構造を表現できる。これは、人間が手動で交互作用項（Interaction Terms）を追加する限界を超え、無限に近い探索空間から「その時々の市場構造」に最適な非線形ロジックを自律的に発見することを可能にする。
+
+第二に、\textbf{「相乗効果による『分散の分散』の実現（Orthogonal Synergy via Boosting）」}である。
+重回帰における変数選択（Stepwise法など）は、しばしば似通ったファクターを選んでしまい、多重共線性による係数の不安定化（Overfitting）を招く。対して本手法の損失関数は、「既存因子との相関」を明確なペナルティとして扱うことで、数理的に「残差の直交化（Residual Orthogonalization）」を強制する。
+これは、勾配ブースティング（Gradient Boosting）のように、「既存のポートフォリオが説明しきれなかった残差部分」だけを説明する新しい因子をピンポイントで探索するプロセスと等価である。結果として、単体では性能が劣る因子であっても、ポートフォリオ全体のダウンサイドリスクを補完する「負の相関を持つ因子」や「独立した情報源」が高い価値として評価され、あらゆる市場環境で大崩れしない堅牢なポートフォリオが構築される。
+
+第三に、\textbf{「テールリスクに対する構造的な頑健性（Structural Robustness via Rank IC）」}である。
+前節の感度解析で証明した通り、金融市場には必ず「ブラックスワン」級の外れ値が存在する。二乗誤差（MSE/Pearson）を最小化する重回帰モデルは、たった一つの外れ値に対して二乗オーダー（$k^2$）で過剰反応し、モデル全体をその特異点に適合させてしまう（過学習）。
+これに対し、本手法が採用するRank ICベースの学習は、外れ値を順位（定数オーダー）に圧縮することで、ノイズを完全に無力化する。これは、予測モデルにおいて「値の正確さ」よりも「順序の正しさ（Ranking Accuracy）」を重視するロング・ショート戦略の本質に合致しており、極端な市場変動時においても、壊滅的なドローダウンを回避しつつ、安定したアルファを提供し続けることを可能にする。
+
+これらにより、本手法は単なる予測精度の向上を超えて、リスク調整後リターン（シャープレシオ）を最大化し、長期的に生存可能な「勝てる」投資戦略の構築を可能にするのである。
+
+\end{document}
